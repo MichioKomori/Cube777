@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>7x7x7 ルービックキューブ（直感ドラッグ完全修正版）</title>
+  <title>7x7x7 ルービックキューブ（完全統合・リセット機能搭載版）</title>
   <style>
     body {
       font-family: 'Helvetica Neue', Arial, sans-serif;
@@ -17,17 +17,54 @@
       overflow-x: hidden;
     }
     h1 { margin: 5px 0; font-size: 24px; }
-    p { color: #aaa; font-size: 13px; margin: 0 0 10px 0; text-align: center; line-height: 1.4; }
+    p { color: #aaa; font-size: 13px; margin: 0 0 15px 0; text-align: center; line-height: 1.4; }
     
-    /* 3D表示エリア */
+    /* 画面レイアウト（3Dビューと2D展開図を横並びに配置） */
+    .main-layout {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      align-items: center;
+      gap: 25px;
+      margin-bottom: 15px;
+      width: 100%;
+      max-width: 1100px;
+    }
+
     #canvas-container {
       width: 100%;
-      max-width: 550px;
-      height: 440px;
+      max-width: 500px;
+      height: 420px;
       background-color: #1a1a1a;
       border-radius: 12px;
       box-shadow: 0 10px 30px rgba(0,0,0,0.7);
-      margin-bottom: 15px;
+    }
+
+    /* 6面展開図（十字型）のレイアウト */
+    #net-container {
+      display: grid;
+      grid-template-columns: repeat(4, 105px);
+      grid-template-rows: repeat(3, 105px);
+      gap: 6px;
+      background-color: #1a1a1a;
+      padding: 12px;
+      border-radius: 12px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.7);
+    }
+    .net-face {
+      display: grid;
+      grid-template-columns: repeat(7, 1fr);
+      grid-template-rows: repeat(7, 1fr);
+      gap: 1px;
+      background-color: #222;
+      padding: 2px;
+      border-radius: 4px;
+      box-sizing: border-box;
+    }
+    .net-sticker {
+      background-color: #151515;
+      border-radius: 1px;
+      transition: background-color 0.1s;
     }
 
     /* コントロールUI */
@@ -72,7 +109,6 @@
     button:hover { background-color: #444; border-color: #0095cf; }
     button:active { background-color: #555; }
     
-    /* 設定項目エリア */
     .system-setting-row {
       margin-top: 10px;
       display: flex;
@@ -82,6 +118,7 @@
       background-color: #222;
       padding: 10px;
       border-radius: 6px;
+      flex-wrap: wrap;
     }
     .count-input {
       width: 60px;
@@ -103,19 +140,31 @@
       border-radius: 6px;
     }
     .system-btn:hover { background-color: #0095cf; }
+    
+    /* リセットボタン専用スタイル（赤系統） */
+    .reset-btn {
+      background-color: #b71234;
+      border-color: #ff3344;
+    }
+    .reset-btn:hover {
+      background-color: #e74c3c;
+    }
   </style>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
 </head>
 <body>
 
-  <h1>7x7x7 Cube Ultimate Control</h1>
+  <h1>7x7x7 Cube Dual-View Pro</h1>
   <p>
-    【ボタン操作】日本語ボタンで各層を確実にデジタル回転（全42ボタン完備）<br>
-    【SHIFT ＋ ドラッグ】回したい層を画面上で直接掴んで直感回転！ / 【通常ドラッグ】全体の視点変更
+    【3D直感操作】SHIFT ＋ 画面ドラッグで回したい層を直接掴んで回転（回転方向完全修正済み）<br>
+    【デジタル操作】下の日本語ボタンで各層を個別回転。3Dの状態は右側の<b>6面展開図へリアルタイムに完全同期</b>します。
   </p>
 
-  <div id="canvas-container"></div>
+  <div class="main-layout">
+    <div id="canvas-container"></div>
+    <div id="net-container"></div>
+  </div>
 
   <div class="controls-section">
     <div id="dynamic-buttons"></div>
@@ -124,6 +173,7 @@
       <span>スクランブル回数:</span>
       <input type="number" id="scramble-count" class="count-input" min="1" max="100" value="40">
       <button class="system-btn" onclick="scramble()">🎲 スクランブル実行</button>
+      <button class="system-btn reset-btn" onclick="resetCube()">↩ 初期状態にリセット</button>
     </div>
   </div>
 
@@ -142,6 +192,22 @@
     const colorCodes = {
       R: 0xb71234, L: 0xff5800, U: 0xffffff, D: 0xffd700, F: 0x009b48, B: 0x0046ad, internal: 0x151515
     };
+
+    // 2D展開図へのマッピング用：3D上の固定スキャン方向と座標変換定義
+    const baseNormals = [
+      new THREE.Vector3(1, 0, 0),  new THREE.Vector3(-1, 0, 0),
+      new THREE.Vector3(0, 1, 0),  new THREE.Vector3(0, -1, 0),
+      new THREE.Vector3(0, 0, 1),  new THREE.Vector3(0, 0, -1)
+    ];
+
+    const faceSpecs = [
+      { id: 'U', normal: new THREE.Vector3(0, 1, 0),  getCoords: (r, c) => ({ x: -30 + c*10, y: 30, z: -30 + r*10 }) },
+      { id: 'D', normal: new THREE.Vector3(0, -1, 0), getCoords: (r, c) => ({ x: -30 + c*10, y: -30, z: 30 - r*10 }) },
+      { id: 'F', normal: new THREE.Vector3(0, 0, 1),  getCoords: (r, c) => ({ x: -30 + c*10, y: 30 - r*10, z: 30 }) },
+      { id: 'B', normal: new THREE.Vector3(0, 0, -1), getCoords: (r, c) => ({ x: 30 - c*10, y: 30 - r*10, z: -30 }) },
+      { id: 'L', normal: new THREE.Vector3(-1, 0, 0), getCoords: (r, c) => ({ x: -30, y: 30 - r*10, z: -30 + c*10 }) },
+      { id: 'R', normal: new THREE.Vector3(1, 0, 0),  getCoords: (r, c) => ({ x: 30, y: 30 - r*10, z: 30 - c*10 }) }
+    ];
 
     function init() {
       const container = document.getElementById('canvas-container');
@@ -167,14 +233,10 @@
       light1.position.set(60, 90, 60);
       scene.add(light1);
 
-      const light2 = new THREE.DirectionalLight(0xffffff, 0.4);
-      light2.position.set(-60, -50, -60);
-      scene.add(light2);
-
       buildCube();
       createUIButtons();
+      create2DNetDOM(); 
 
-      // ポインターイベントを先行キャプチャして登録
       renderer.domElement.addEventListener('pointerdown', onPointerDown, true);
       renderer.domElement.addEventListener('pointerup', onPointerUp, true);
 
@@ -209,6 +271,10 @@
             ];
             const cubie = new THREE.Mesh(geom, cubieMaterials);
             cubie.position.set(x * 10, y * 10, z * 10);
+            
+            // 🛠️ リセット用に、初期の絶対座標をあらかじめ記憶させておく
+            cubie.userData = { initX: x * 10, initY: y * 10, initZ: z * 10 };
+            
             scene.add(cubie);
             cubies.push(cubie);
           }
@@ -275,6 +341,64 @@
       });
       globalRow.appendChild(globalGroup);
       container.appendChild(globalRow);
+    }
+
+    // 6面展開図のDOMを動的に組み立てる（十字型配置）
+    function create2DNetDOM() {
+      const container = document.getElementById('net-container');
+      const gridPositions = {
+        'U': { row: 1, col: 2 }, 'L': { row: 2, col: 1 }, 'F': { row: 2, col: 2 },
+        'R': { row: 2, col: 3 }, 'B': { row: 2, col: 4 }, 'D': { row: 3, col: 2 }
+      };
+      
+      ['U', 'L', 'F', 'R', 'B', 'D'].forEach(id => {
+        const faceEl = document.createElement('div');
+        faceEl.className = 'net-face';
+        faceEl.style.gridRow = gridPositions[id].row;
+        faceEl.style.gridColumn = gridPositions[id].col;
+        
+        for(let r=0; r<7; r++) {
+          for(let c=0; c<7; c++) {
+            const sticker = document.createElement('div');
+            sticker.className = 'net-sticker';
+            sticker.id = `net-${id}-${r}-${c}`;
+            faceEl.appendChild(sticker);
+          }
+        }
+        container.appendChild(faceEl);
+      });
+    }
+
+    // 3Dの状態を直接スキャンして2D展開図に色を流し込む同期エンジン
+    function update2DNetView() {
+      let posMap = {};
+      cubies.forEach(c => {
+        let p = new THREE.Vector3();
+        c.getWorldPosition(p);
+        let key = `${Math.round(p.x)},${Math.round(p.y)},${Math.round(p.z)}`;
+        posMap[key] = c;
+      });
+      
+      faceSpecs.forEach(spec => {
+        for(let r=0; r<7; r++) {
+          for(let c=0; c<7; c++) {
+            let coords = spec.getCoords(r, c);
+            let key = `${coords.x},${coords.y},${coords.z}`;
+            let cubie = posMap[key];
+            
+            const stickerEl = document.getElementById(`net-${spec.id}-${r}-${c}`);
+            if (cubie && stickerEl) {
+              let maxDot = -1, bestIdx = 0;
+              for(let i=0; i<6; i++) {
+                let currentNormal = baseNormals[i].clone().applyQuaternion(cubie.quaternion);
+                let dot = currentNormal.dot(spec.normal);
+                if(dot > maxDot) { maxDot = dot; bestIdx = i; }
+              }
+              stickerEl.style.backgroundColor = '#' + cubie.material[bestIdx].color.getHexString();
+            }
+          }
+        }
+      });
     }
 
     // レイヤー位置判定関数
@@ -411,9 +535,6 @@
       }
 
       let dot = rotAxis.dot(finalAxis);
-      
-      // 🛠️【今回の超重要修正】
-      // dot < 0 を dot > 0 に変更。これでドラッグした方向にパーツがそのまま動く直感的な挙動になります。
       let cw = dot > 0; 
 
       executeMoveMouse(moveType, posValue, cw, finalAxis);
@@ -461,6 +582,22 @@
         }
       }
       renderFrame();
+    }
+
+    // 🛠️【新規追加】キューブの状態とカメラ位置を完全リセットする関数
+    function resetCube() {
+      if (isAnimating) return; // 回転アニメーション中はバグ防止のためロック
+
+      // 1. 全343個の小キューブを、生成時の初期位置・初期の回転角(0)に戻す
+      cubies.forEach(cubie => {
+        cubie.position.set(cubie.userData.initX, cubie.userData.initY, cubie.userData.initZ);
+        cubie.quaternion.set(0, 0, 0, 1);
+      });
+
+      // 2. カメラの向きと注視点も初期配置にリセット
+      camera.position.set(70, 70, 120);
+      controls.target.set(0, 0, 0);
+      controls.update();
     }
 
     // スクランブル用
@@ -511,6 +648,7 @@
     function animate() {
       requestAnimationFrame(animate);
       controls.update();
+      update2DNetView(); 
       renderer.render(scene, camera);
     }
 
